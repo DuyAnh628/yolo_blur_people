@@ -35,8 +35,9 @@ def thread_track(track_id, crop):
     emb = detect_faces(crop)
     if emb is not None and target_face_embedding is not None:
         s = compute_similarity(emb, target_face_embedding, normalized=True)
-        if s > 0.175:
-            identity_cache[track_id] = "match"
+        if s > 0.2:
+            if track_id in identity_cache:
+                identity_cache[track_id] = "match"
             return
 
     # 2. Fallback: match body/clothing histogram if face is occluded or turned away
@@ -44,11 +45,13 @@ def thread_track(track_id, crop):
         crop_hist = extract_body_hist(crop)
         if crop_hist is not None:
             similarity = cv2.compareHist(target_body_hist, crop_hist, cv2.HISTCMP_CORREL)
-            if similarity > 0.5:  # Body appearance similarity threshold
-                identity_cache[track_id] = "match"
+            if similarity > 0.7:  # Body appearance similarity threshold
+                if track_id in identity_cache:
+                    identity_cache[track_id] = "match"
                 return
 
-    identity_cache[track_id] = "no match"
+    if track_id in identity_cache:
+        identity_cache[track_id] = "no match"
 
 def run_hand_tracking(frame):
     global hand_detected, hand_thread_busy
@@ -80,7 +83,7 @@ def detect_person_yolov8(video_path):
 
         # Run YOLOv8 inference on GPU
         results = model.track(frame, device=device, persist=True,
-                              classes=[0], conf=0.25, verbose=False)
+                              classes=[0], conf=0.15, verbose=False)
         active_ids = set()
         for r in results:
             if r.boxes.id is None:
@@ -108,10 +111,16 @@ def detect_person_yolov8(video_path):
                     if label == "no match":
                         if not hand_detected:
                             roi = frame[y1:y2, x1:x2]
-                            blurred = cv2.GaussianBlur(roi, (51, 51), 0)
+                            blurred = cv2.blur(roi, (31, 31))
                             frame[y1:y2, x1:x2] = blurred
 
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+        # Remove track_ids no longer in the current frame from cache
+        # If the person reappears in subsequent frames, they will be re-added and re-identified
+        for tid in list(identity_cache.keys()):
+            if tid not in active_ids:
+                del identity_cache[tid]
 
         cv2.imshow("YOLOv8 Person Detection - Video", frame)
 
