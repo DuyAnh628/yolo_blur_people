@@ -1,33 +1,65 @@
-﻿import threading
+import threading
 import cv2
 import torch
 from ultralytics import YOLO
 from detect_faces import detect_faces
 from uniface.face_utils import compute_similarity
+from hand_tracking import detect_hands
 
-# Tự động chọn GPU (CUDA) nếu có, ngược lại dùng CPU
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Target face embedding to compare (extract once outside the loop)
-target_embedding = detect_faces("face_1.png")
+# Target profiles: face and body (loaded once)
+target_face_embedding = detect_faces("face_1.png")
 
-# Cache: track_id -> "match" | "no match" | None
+# Extract color histogram from body_1.png (simple, lightweight, and fast)
+def extract_body_hist(image):
+    if isinstance(image, str):
+        image = cv2.imread(image)
+    if image is None or image.size == 0:
+        return None
+    # Use HSV color space to represent clothing/body color distribution
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
+    cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+    return hist
+
+target_body_hist = extract_body_hist("body_1.png")
+
+# Cache: track_id -> "match" | "no match" | "pending"
 identity_cache = {}
+hand_detected = False
+hand_thread_busy = False
 
 def thread_track(track_id, crop):
+    # 1. Match against face embedding first
     emb = detect_faces(crop)
-    if emb is not None:
-        s = compute_similarity(emb, target_embedding, normalized=True)
-        identity_cache[track_id] = "match" if s > 0.175 else "no match"
-    else:
-        identity_cache[track_id] = None
+    if emb is not None and target_face_embedding is not None:
+        s = compute_similarity(emb, target_face_embedding, normalized=True)
+        if s > 0.175:
+            identity_cache[track_id] = "match"
+            return
+
+    # 2. Fallback: match body/clothing histogram if face is occluded or turned away
+    if target_body_hist is not None:
+        crop_hist = extract_body_hist(crop)
+        if crop_hist is not None:
+            similarity = cv2.compareHist(target_body_hist, crop_hist, cv2.HISTCMP_CORREL)
+            if similarity > 0.5:  # Body appearance similarity threshold
+                identity_cache[track_id] = "match"
+                return
+
+    identity_cache[track_id] = "no match"
+
+def run_hand_tracking(frame):
+    global hand_detected, hand_thread_busy
+    try:
+        hand_detected = detect_hands(frame)
+    finally:
+        hand_thread_busy = False
 
 def detect_person_yolov8(video_path):
 
-    # Load pretrained YOLOv8n model và nạp lên GPU
     model = YOLO("yolo26n.pt").to(device)
-
-    # Open video file instead of webcam
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print("Video couldn't be opened.")
@@ -35,15 +67,20 @@ def detect_person_yolov8(video_path):
 
     print("[INFO] Running YOLOv8 Person Detection on Video. Press 'q' to quit.")
 
+    global hand_thread_busy
     while True:
         ret, frame = cap.read()
         if not ret:  # End of video
             break
 
-        # Run YOLOv8 inference trên GPU
+        # Only spawn a new hand detection thread if previous thread has finished
+        if not hand_thread_busy:
+            hand_thread_busy = True
+            threading.Thread(target=run_hand_tracking, args=(frame.copy(),), daemon=True).start()
+
+        # Run YOLOv8 inference on GPU
         results = model.track(frame, device=device, persist=True,
                               classes=[0], conf=0.25, verbose=False)
-
         active_ids = set()
         for r in results:
             if r.boxes.id is None:
@@ -57,7 +94,7 @@ def detect_person_yolov8(video_path):
                     active_ids.add(track_id)
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                    # Nhận diện chỉ khi chưa có trong cache
+                    # Detect face if not in cache
                     if track_id not in identity_cache:
                         identity_cache[track_id] = "pending" 
                         crop = frame[y1:y2, x1:x2].copy()
@@ -65,18 +102,16 @@ def detect_person_yolov8(video_path):
 
                     label = identity_cache.get(track_id) or "unknown"
                     color = (0, 255, 0) if label == "match" else (0, 0, 255)
-
-                    # Blur người không match hoặc chưa nhận diện được
-                    if label != "match":
-                        roi = frame[y1:y2, x1:x2]
-                        blurred = cv2.GaussianBlur(roi, (51, 51), 0)
-                        frame[y1:y2, x1:x2] = blurred
+                    
+                    # Only blur when confirmed as "no match"
+                    # Ignore during "pending" to prevent initial frame flickering for the target person
+                    if label == "no match":
+                        if not hand_detected:
+                            roi = frame[y1:y2, x1:x2]
+                            blurred = cv2.GaussianBlur(roi, (51, 51), 0)
+                            frame[y1:y2, x1:x2] = blurred
 
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
-        # Xóa track_id không còn trong frame
-        for sid in set(identity_cache) - active_ids:
-            del identity_cache[sid]
 
         cv2.imshow("YOLOv8 Person Detection - Video", frame)
 

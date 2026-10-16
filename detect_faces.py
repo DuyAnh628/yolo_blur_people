@@ -52,7 +52,10 @@ def detect_landmarks_2(image):
     }
     return landmarks_dict
 
-detector, recognizer = RetinaFace(), AdaFace()
+# Prefer GPU execution provider with CPU fallback
+providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+detector = RetinaFace(providers=providers)
+recognizer = AdaFace(providers=providers)
 
 def detect_faces(image, max_dim=480):
     if isinstance(image, str):
