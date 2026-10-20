@@ -1,3 +1,4 @@
+import glob
 import threading
 import cv2
 import torch
@@ -23,7 +24,11 @@ def extract_body_hist(image):
     cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
     return hist
 
-target_body_hist = extract_body_hist("body_1.png")
+target_body_hists = []
+for file in sorted(glob.glob("body_*.png")):
+    hist = extract_body_hist(file)
+    if hist is not None:
+        target_body_hists.append(hist)
 
 # Cache: track_id -> "match" | "no match" | "pending"
 identity_cache = {}
@@ -41,11 +46,11 @@ def thread_track(track_id, crop):
             return
 
     # 2. Fallback: match body/clothing histogram if face is occluded or turned away
-    if target_body_hist is not None:
+    if target_body_hists:
         crop_hist = extract_body_hist(crop)
         if crop_hist is not None:
-            similarity = cv2.compareHist(target_body_hist, crop_hist, cv2.HISTCMP_CORREL)
-            if similarity > 0.7:  # Body appearance similarity threshold
+            matched = any(cv2.compareHist(h, crop_hist, cv2.HISTCMP_CORREL) > 0.7 for h in target_body_hists)
+            if matched:
                 if track_id in identity_cache:
                     identity_cache[track_id] = "match"
                 return
