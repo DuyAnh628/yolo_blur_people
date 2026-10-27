@@ -1,4 +1,3 @@
-import glob
 import threading
 import cv2
 import torch
@@ -9,51 +8,35 @@ from uniface.face_utils import compute_similarity
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Target profiles: face and body (loaded once)
+# Target face profile
 target_face_embedding = detect_faces("face_1.png")
-# Extract color histogram from body_1.png (simple, lightweight, and fast)
-def extract_body_hist(image):
-    if isinstance(image, str):
-        image = cv2.imread(image)
-    if image is None or image.size == 0:
-        return None
-    # Use HSV color space to represent clothing/body color distribution
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
-    cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-    return hist
 
-target_body_hists = []
-for file in sorted(glob.glob("body_*.png")):
-    hist = extract_body_hist(file)
-    if hist is not None:
-        target_body_hists.append(hist)
-
-# Cache: track_id -> "match" | "no match" | "pending"
+# Cache: track_id -> status and face-check scheduling data
 identity_cache = {}
+identity_cache_lock = threading.Lock()
+FACE_RECHECK_INTERVAL = 3
 
 def thread_track(track_id, crop):
-    # 1. Match against face embedding first
-    emb = detect_faces(crop)
-    if emb is not None and target_face_embedding is not None:
-        s = compute_similarity(emb, target_face_embedding, normalized=True)
-        if s > 0.2:
-            if track_id in identity_cache:
-                identity_cache[track_id] = "match"
-            return
+    try:
+        # A face detection is required before identity can be decided.
+        emb = detect_faces(crop)
+        if emb is None:
+            status = "no_face"
+        elif target_face_embedding is not None:
+            similarity = compute_similarity(emb, target_face_embedding, normalized=True)
+            status = "match" if similarity > 0.2 else "no_match"
+        else:
+            # With no configured target face, a visible face cannot be matched.
+            status = "no_match"
+    except Exception as exc:
+        print(f"[WARN] Face check failed for track {track_id}: {exc}")
+        status = "no_face"
 
-    # 2. Fallback: match body/clothing histogram if face is occluded or turned away
-    if target_body_hists:
-        crop_hist = extract_body_hist(crop)
-        if crop_hist is not None:
-            matched = any(cv2.compareHist(h, crop_hist, cv2.HISTCMP_CORREL) > 0.75 for h in target_body_hists)
-            if matched:
-                if track_id in identity_cache:
-                    identity_cache[track_id] = "match"
-                return
-
-    if track_id in identity_cache:
-        identity_cache[track_id] = "no match"
+    with identity_cache_lock:
+        state = identity_cache.get(track_id)
+        if state is not None:
+            state["status"] = status
+            state["checking"] = False
 
 def detect_person_yolov8(video_path):
 
@@ -65,10 +48,12 @@ def detect_person_yolov8(video_path):
 
     print("[INFO] Running YOLOv8 Person Detection on Video. Press 'q' to quit.")
 
+    frame_index = 0
     while True:
         ret, frame = cap.read()
         if not ret:  # End of video
             break
+        frame_index += 1
 
         # Run YOLOv8 inference on GPU
         results = model.track(frame, device=device, persist=True,
@@ -86,30 +71,56 @@ def detect_person_yolov8(video_path):
                     active_ids.add(track_id)
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                    # Detect face if not in cache
-                    if track_id not in identity_cache:
-                        identity_cache[track_id] = "pending" 
-                        crop = frame[y1:y2, x1:x2].copy()
-                        threading.Thread(target=thread_track, args=(track_id, crop), daemon=True).start()
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+                    if x2 <= x1 or y2 <= y1:
+                        continue
 
-                    label = identity_cache.get(track_id) or "unknown"
+                    with identity_cache_lock:
+                        state = identity_cache.get(track_id)
+                        if state is None:
+                            state = {"status": "pending", "checking": False,
+                                     "last_check": -FACE_RECHECK_INTERVAL}
+                            identity_cache[track_id] = state
+                        should_check = (
+                            not state["checking"] and
+                            frame_index - state["last_check"] >= FACE_RECHECK_INTERVAL
+                        )
+                        if should_check:
+                            state["checking"] = True
+                            state["last_check"] = frame_index
+                        label = state["status"]
+
+                    if should_check:
+                        crop = frame[y1:y2, x1:x2].copy()
+                        threading.Thread(
+                            target=thread_track, args=(track_id, crop), daemon=True
+                        ).start()
+
                     color = (0, 255, 0) if label == "match" else (0, 0, 255)
-                    
-                    # Only blur when confirmed as "no match"
-                    # Ignore during "pending" to prevent initial frame flickering for the target person
-                    # Note: Làm mờ trực tiếp người không khớp (bỏ kiểm tra tay để tránh flicker và nghẽn CPU)
-                    if label == "no match":
+                    display_label = {
+                        "match": "target",
+                        "no_match": "stranger",
+                        "no_face": "no visible face",
+                        "pending": "checking face",
+                    }.get(label, "unknown")
+
+                    # Blur the whole person only while a visible face identifies them as a stranger.
+                    if label == "no_match":
                         roi = frame[y1:y2, x1:x2]
                         blurred = cv2.blur(roi, (31, 31))
                         frame[y1:y2, x1:x2] = blurred
 
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, display_label, (x1, max(20, y1 - 8)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
         # Remove track_ids no longer in the current frame from cache
         # If the person reappears in subsequent frames, they will be re-added and re-identified
-        for tid in list(identity_cache.keys()):
-            if tid not in active_ids:
-                del identity_cache[tid]
+        with identity_cache_lock:
+            for tid in list(identity_cache.keys()):
+                if tid not in active_ids:
+                    del identity_cache[tid]
 
         cv2.imshow("YOLOv8 Person Detection - Video", frame)
 
