@@ -1,0 +1,12 @@
+__pycache__
+.venv
+depth-anything-3
+uniface
+datasets
+runs
+.gitignore
+AGENT.md
+SKILLS
+changed.txt
+media
+train-depth.py

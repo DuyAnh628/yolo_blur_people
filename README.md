@@ -12,7 +12,7 @@ python detect_faces.py
 python hand_tracking.py
 ```
 
-The Python implementations are in these root scripts. `detect_people.py` uses `media/vlog_japan.mp4`, `models/yolo26n.pt`, and `assets/faces/face_1.png` by default. The local depth script is not included in Git.
+The Python implementations are in these root scripts. `detect_people.py` uses `media/vlog_japan.mp4`, `models/yolo26n.pt`, and `assets/faces/face_1.png` by default. The sample video is kept locally because it exceeds GitHub's 100 MB file limit; after cloning, place it at `media/vlog_japan.mp4`. The local depth script is not included in Git.
 
 ## Project layout
 
@@ -20,7 +20,7 @@ The Python implementations are in these root scripts. `detect_people.py` uses `m
 assets/
   faces/                 # face reference images
   images/                # sample images
-media/                   # sample video
+media/                   # local-only sample video (not tracked)
 models/                  # YOLO weights and OpenVINO model
 datasets/                # local training datasets
 runs/                    # YOLO training outputs
