@@ -79,8 +79,8 @@ def detect_faces(image, max_dim=480):
     return embedding
 
 if __name__ == "__main__":
-    emb1 = detect_faces("face_1.png")
-    emb2 = detect_faces("face_2.png")
+    emb1 = detect_faces("assets/faces/face_1.png")
+    emb2 = detect_faces("assets/faces/face_2.png")
     if emb1 is not None and emb2 is not None:
         score = compute_similarity(emb1, emb2, normalized=True)
         print(f"{score:+.3f}", "match" if score > 0.4 else "no match")

@@ -1,0 +1,60 @@
+Changes made to detect_people.py
+
+1. Added multi-frame identity confirmation. Each track keeps up to five valid face-match results. It becomes `target` after at least three matches, or `stranger` after at least three mismatches. Missing-face checks do not count as votes; mixed or insufficient results keep the last stable status (or remain pending for a new track).
+
+2. Set `FACE_RECHECK_INTERVAL` to two frames, approximating a 0.05-second check interval at 30 FPS (actual cadence: about 0.067 seconds). Identity-cache cleanup retains a track while it is absent for fewer than `FACE_RECHECK_INTERVAL` consecutive frames, then deletes it. The missing-frame count resets whenever the track is detected again.
+
+3. The face-match similarity threshold remains at 0.15; it was not changed.
+
+4. Face identification uses a shared thread pool limited to two concurrent checks.
+
+5. Removed performance timing and FPS reporting from the video loop. Functional person detection, face matching, and identity caching remain active.
+
+## Codebase redesign (2026-10-28)
+
+### New module: `yolo_blur.identity.IdentityRegistry`
+
+The video application's identity state now has one owner in `yolo_blur/identity.py`. Its small interface is `schedule(track_id, frame_index)`, `complete(track_id, result)`, and `prune(active_track_ids)`. The implementation keeps the lock, per-track state, bounded vote history, confirmation rule, check cadence, and missing-frame cleanup together.
+
+`schedule` atomically reserves a due face check and returns the status that the renderer should use for this frame. `complete` releases that reservation and records only `match` or `no_match`; `no_face` and failed checks do not vote. A status changes only after three votes of one type appear within the last five valid face results. `prune` retains a track for one absent frame and removes it on the second, matching the former two-frame policy.
+
+### Pipeline integration
+
+`detect_people.py` remains the runnable video entry point and retains model loading, face recognition, drawing, blur, and display. It delegates track state transitions to `IdentityRegistry` instead of managing a shared dictionary and lock inside the frame loop. The existing two-worker face-check pool and detection thresholds are unchanged. The `yolo_blur` package is additive, so existing script invocation and imports remain usable.
+
+### Repository shape
+
+```text
+yolo_blur/
+  __init__.py       # exposes the identity registry
+  identity.py       # owns per-track identity state and lifecycle
+detect_people.py    # video orchestration and presentation
+detect_faces.py    # face embedding adapter
+hand_tracking.py   # standalone hand demo
+train-depth.py     # standalone depth demo
+uniface/            # vendored face-analysis library
+```
+
+This places the seam between video orchestration and identity lifecycle. The registry is independent of OpenCV, YOLO, and face models, so its behavior can be reasoned about without initializing those heavyweight dependencies; the pipeline supplies face-check results through `complete`.
+
+## Full project reorganization (2026-10-28)
+
+### Initial package structure (later reverted below)
+
+Moved application implementations into `yolo_blur/` so the root is no longer a collection of unrelated scripts. `video.py` owns the person-tracking workflow and composes the identity registry with the face-recognition module. `face_recognition.py` owns face detection and embedding extraction. `demos/depth.py` and `demos/hands.py` contain the optional depth and hand demos. The hand demo now exposes a reusable `HandDetector` context manager, so callers processing video can reuse one MediaPipe graph and release it explicitly.
+
+At this stage, the root scripts `detect_people.py`, `detect_faces.py`, `hand_tracking.py`, and `train-depth.py` were compatibility launchers/import shims. This script relocation was later reversed as recorded below.
+
+### Data and documentation layout
+
+Grouped reference portraits under `assets/faces/`, sample images under `assets/images/`, and the example video under `media/`. Grouped YOLO `.pt` weights under `models/` and the OpenVINO model bundle under `models/openvino/yolov8n/`. Updated default paths in the person and depth modules to use these locations. Moved the legacy change summary and performance notes into `docs/`. Added `README.md` with run commands, module entry points, and a project map. Updated `.gitignore` so moved sample assets and model files are visible to version control rather than ignored by their former root-level names.
+
+### New module seams
+
+At that stage `yolo_blur.video` orchestrated frame capture, tracking, recognition scheduling, blur, and display. The vendored `uniface/`, local training datasets, and YOLO-generated `runs/` remained in their established locations.
+
+## Original Git script code restored (2026-10-28)
+
+Restored `detect_people.py`, `detect_faces.py`, `hand_tracking.py`, and `train-depth.py` from `origin/main` revision `5c14feb` (“change the logic and delete clothing fallback”). This restores the original implementation structure and behavior, including the track cache and face-check scheduling in `detect_people.py`, the original face helpers, the original standalone hand example, and the original depth video loop.
+
+Kept the organized `assets/`, `media/`, and `models/` folders. Updated only the script paths needed to read the moved files: face references use `assets/faces/`, video uses `media/`, and YOLO weights use `models/`. The scripts stay at the project root, and the `yolo_blur/` package has been removed. `train-depth.py` remains in the local workspace, but is ignored and excluded from this push as requested. Updated `README.md` to describe the shared root-script layout.

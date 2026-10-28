@@ -4,12 +4,11 @@ import torch
 from ultralytics import YOLO
 from detect_faces import detect_faces
 from uniface.face_utils import compute_similarity
-# Note: Đã loại bỏ module nhận diện tay (hand_tracking) để tối ưu CPU và đơn giản hóa pipeline
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Target face profile
-target_face_embedding = detect_faces("face_1.png")
+target_face_embedding = detect_faces("assets/faces/face_1.png")
 
 # Cache: track_id -> status and face-check scheduling data
 identity_cache = {}
@@ -40,7 +39,7 @@ def thread_track(track_id, crop):
 
 def detect_person_yolov8(video_path):
 
-    model = YOLO("yolo26n.pt").to(device)
+    model = YOLO("models/yolo26n.pt").to(device)
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print("Video couldn't be opened.")
@@ -132,4 +131,4 @@ def detect_person_yolov8(video_path):
     print("[INFO] Detection complete.")
 
 if __name__ == "__main__":
-    detect_person_yolov8("vlog_japan.mp4")
+    detect_person_yolov8("media/vlog_japan.mp4")
