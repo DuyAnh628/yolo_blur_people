@@ -54,15 +54,16 @@ def detect_landmarks_2(image):
 
 # Prefer GPU execution provider with CPU fallback
 providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-detector = RetinaFace(providers=providers)
+detector = RetinaFace(providers=providers, confidence_threshold=0.4)
 recognizer = AdaFace(providers=providers)
 
-def detect_faces(image, max_dim=480):
+def detect_faces(image, max_dim=640, return_bbox=False):
     if isinstance(image, str):
         image = cv2.imread(image)
     if image is None:
-        return None
+        return (None, None) if return_bbox else None
 
+    scale = 1.0
     # Tự động scale ảnh nếu quá lớn để detect cực nhanh
     if max_dim is not None:
         h, w = image.shape[:2]
@@ -72,10 +73,13 @@ def detect_faces(image, max_dim=480):
 
     faces = detector.detect(image)
     if not faces:
-        return None
+        return (None, None) if return_bbox else None
 
     best_face = max(faces, key=lambda f: f.confidence)
     embedding = recognizer.get_normalized_embedding(image, best_face.landmarks)
+    if return_bbox:
+        bbox = tuple(int(round(coord / scale)) for coord in best_face.bbox)
+        return embedding, bbox
     return embedding
 
 if __name__ == "__main__":

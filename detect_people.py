@@ -7,8 +7,12 @@ from uniface.face_utils import compute_similarity
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Target face profile
-target_face_embedding = detect_faces("assets/faces/face_1.png")
+# Target face profile from four reference images
+target_face_embeddings = [
+    detect_faces(f"assets/faces/face_{index}.png")
+    for index in range(1, 5)
+]
+FACE_SIMILARITY_THRESHOLD = 0.15
 
 # Cache: track_id -> status and face-check scheduling data
 identity_cache = {}
@@ -16,14 +20,22 @@ identity_cache_lock = threading.Lock()
 FACE_RECHECK_INTERVAL = 3
 
 def thread_track(track_id, crop):
+    face_box = None
     try:
         # A face detection is required before identity can be decided.
-        emb = detect_faces(crop)
+        emb, face_box = detect_faces(crop, return_bbox=True)
         if emb is None:
             status = "no_face"
-        elif target_face_embedding is not None:
-            similarity = compute_similarity(emb, target_face_embedding, normalized=True)
-            status = "match" if similarity > 0.2 else "no_match"
+        elif all(reference is not None for reference in target_face_embeddings):
+            similarities = [
+                compute_similarity(emb, reference, normalized=True)
+                for reference in target_face_embeddings
+            ]
+            status = (
+                "match"
+                if all(score > FACE_SIMILARITY_THRESHOLD for score in similarities)
+                else "no_match"
+            )
         else:
             # With no configured target face, a visible face cannot be matched.
             status = "no_match"
@@ -36,6 +48,14 @@ def thread_track(track_id, crop):
         if state is not None:
             state["status"] = status
             state["checking"] = False
+            if face_box is not None:
+                h, w = crop.shape[:2]
+                state["face_box"] = (
+                    face_box[0] / w, face_box[1] / h,
+                    face_box[2] / w, face_box[3] / h,
+                )
+            else:
+                state["face_box"] = None
 
 def detect_person_yolov8(video_path):
 
@@ -79,7 +99,8 @@ def detect_person_yolov8(video_path):
                         state = identity_cache.get(track_id)
                         if state is None:
                             state = {"status": "pending", "checking": False,
-                                     "last_check": -FACE_RECHECK_INTERVAL}
+                                 "last_check": -FACE_RECHECK_INTERVAL,
+                                 "face_box": None}
                             identity_cache[track_id] = state
                         should_check = (
                             not state["checking"] and
@@ -89,6 +110,7 @@ def detect_person_yolov8(video_path):
                             state["checking"] = True
                             state["last_check"] = frame_index
                         label = state["status"]
+                        face_box = state["face_box"]
 
                     if should_check:
                         crop = frame[y1:y2, x1:x2].copy()
@@ -104,11 +126,22 @@ def detect_person_yolov8(video_path):
                         "pending": "checking face",
                     }.get(label, "unknown")
 
-                    # Blur the whole person only while a visible face identifies them as a stranger.
-                    if label == "no_match":
-                        roi = frame[y1:y2, x1:x2]
-                        blurred = cv2.blur(roi, (31, 31))
-                        frame[y1:y2, x1:x2] = blurred
+                    # Blur only the detected face of a stranger.
+                    if label == "no_match" and face_box is not None:
+                        person_w, person_h = x2 - x1, y2 - y1
+                        face_x1 = x1 + int(face_box[0] * person_w)
+                        face_y1 = y1 + int(face_box[1] * person_h)
+                        face_x2 = x1 + int(face_box[2] * person_w)
+                        face_y2 = y1 + int(face_box[3] * person_h)
+                        pad_x = int((face_x2 - face_x1) * 0.3)
+                        pad_y = int((face_y2 - face_y1) * 0.3)
+                        fx1 = max(x1, face_x1 - pad_x)
+                        fy1 = max(y1, face_y1 - pad_y)
+                        fx2 = min(x2, face_x2 + pad_x)
+                        fy2 = min(y2, face_y2 + pad_y)
+                        if fx2 > fx1 and fy2 > fy1:
+                            roi = frame[fy1:fy2, fx1:fx2]
+                            frame[fy1:fy2, fx1:fx2] = cv2.blur(roi, (31, 31))
 
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(frame, display_label, (x1, max(20, y1 - 8)),
@@ -131,4 +164,4 @@ def detect_person_yolov8(video_path):
     print("[INFO] Detection complete.")
 
 if __name__ == "__main__":
-    detect_person_yolov8("media/vlog_japan.mp4")
+    detect_person_yolov8("media/vlog_warehouse.mp4")

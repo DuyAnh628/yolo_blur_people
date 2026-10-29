@@ -58,3 +58,17 @@ At that stage `yolo_blur.video` orchestrated frame capture, tracking, recognitio
 Restored `detect_people.py`, `detect_faces.py`, `hand_tracking.py`, and `train-depth.py` from `origin/main` revision `5c14feb` (“change the logic and delete clothing fallback”). This restores the original implementation structure and behavior, including the track cache and face-check scheduling in `detect_people.py`, the original face helpers, the original standalone hand example, and the original depth video loop.
 
 Kept the organized `assets/`, `media/`, and `models/` folders. Updated only the script paths needed to read the moved files: face references use `assets/faces/`, video uses `media/`, and YOLO weights use `models/`. The scripts stay at the project root, and the `yolo_blur/` package has been removed. `train-depth.py` remains in the local workspace, but is ignored and excluded from this push as requested. The 135 MB sample video also remains local and is omitted from Git because GitHub rejects files larger than 100 MB. Updated `README.md` to describe these limits and the shared root-script layout.
+
+## Face-only blur (2026-10-29)
+
+Changed stranger anonymization in `detect_people.py` from blurring the full person box to blurring only the detected face box. `detect_faces()` can optionally return the selected face coordinates alongside its embedding; existing callers still receive only the embedding by default. The background face check stores the returned box relative to the tracked person, and the frame loop maps it back onto the current person box before blurring. Matching, detection thresholds, and the existing box and label display are unchanged.
+
+The face blur box now adds 30% of the detected face width and height on each side, clipped to the tracked person box.
+
+## Face detection tuning (2026-10-29)
+
+Raised the maximum face-crop dimension from 480 to 640 pixels so the detector receives more detail for small faces. Lowered RetinaFace's confidence threshold from its default 0.5 to 0.4 to catch more low-confidence faces. This favors recall and can also admit more false detections. The face identity similarity threshold in `detect_people.py` was left unchanged.
+
+## Four reference face images (2026-10-29)
+
+`detect_people.py` now loads `face_1.png` through `face_4.png` as one enrolled identity using the existing pretrained AdaFace model. A detected face is accepted as the target only when its normalized similarity is greater than `0.15` against all four reference embeddings. If any reference image cannot produce an embedding, the target is not accepted. Here `0.15` is the embedding similarity threshold, not the face detector's confidence score.
