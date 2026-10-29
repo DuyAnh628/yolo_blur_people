@@ -1,4 +1,5 @@
 import threading
+from pathlib import Path
 import cv2
 import torch
 from ultralytics import YOLO
@@ -7,11 +8,17 @@ from uniface.face_utils import compute_similarity
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Target face profile from four reference images
-target_face_embeddings = [
-    detect_faces(f"assets/faces/face_{index}.png")
-    for index in range(1, 5)
-]
+# Each usable image in assets/faces is a separate person to keep unblurred.
+# Multiple selected people are accepted independently: matching any one of
+# their reference images is enough to leave that tracked face clear.
+reference_face_embeddings = {}
+for reference_path in sorted(Path("assets/faces").glob("face_*")):
+    if reference_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+        continue
+    embedding = detect_faces(str(reference_path))
+    if embedding is not None:
+        reference_face_embeddings[reference_path.stem] = embedding
+
 FACE_SIMILARITY_THRESHOLD = 0.15
 
 # Cache: track_id -> status and face-check scheduling data
@@ -26,16 +33,14 @@ def thread_track(track_id, crop):
         emb, face_box = detect_faces(crop, return_bbox=True)
         if emb is None:
             status = "no_face"
-        elif all(reference is not None for reference in target_face_embeddings):
+        elif reference_face_embeddings:
             similarities = [
                 compute_similarity(emb, reference, normalized=True)
-                for reference in target_face_embeddings
+                for reference in reference_face_embeddings.values()
             ]
-            status = (
-                "match"
-                if all(score > FACE_SIMILARITY_THRESHOLD for score in similarities)
-                else "no_match"
-            )
+            # Any selected person can match. The references are alternatives
+            # for the keep-clear set, not photos that one face must match all of.
+            status = "match" if max(similarities) > FACE_SIMILARITY_THRESHOLD else "no_match"
         else:
             # With no configured target face, a visible face cannot be matched.
             status = "no_match"
@@ -76,7 +81,7 @@ def detect_person_yolov8(video_path):
 
         # Run YOLOv8 inference on GPU
         results = model.track(frame, device=device, persist=True,
-                              classes=[0], conf=0.15, verbose=False)
+                              classes=[0], conf=0.2, verbose=False)
         active_ids = set()
         for r in results:
             if r.boxes.id is None:
